@@ -1,74 +1,63 @@
 import os
 import joblib
-import librosa
 import numpy as np
+import librosa
+import tensorflow as tf
+import tensorflow_hub as hub
 
 # ===============================
-# CONFIGURATION
+# PATH CONFIG
 # ===============================
-MODEL_PATH = "models/yamnet_svm.pkl"
-ENCODER_PATH = "models/label_encoder.pkl"
-TEST_AUDIO_DIR = "test_audio"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# folder with unseen .wav files
+MODEL_PATH = os.path.join(BASE_DIR, "models", "yamnet_svm.pkl")
+ENCODER_PATH = os.path.join(BASE_DIR, "models", "label_encoder.pkl")
+TEST_AUDIO_DIR = os.path.join(BASE_DIR, "test_audio")
 
-SAMPLE_RATE = 22050
-N_MFCC = 40
+SUPPORTED_FORMATS = (".wav", ".mp3", ".mpeg")
 
+SAMPLE_RATE = 16000   # YAMNet REQUIRED sample rate
 
 # ===============================
 # LOAD MODEL & ENCODER
 # ===============================
-print("Loading model and encoder...")
+print("Loading SVM model and encoder...")
 model = joblib.load(MODEL_PATH)
 encoder = joblib.load(ENCODER_PATH)
-print("Model and encoder loaded successfully.\n")
+
+print("Loading YAMNet model...")
+yamnet_model = hub.load("https://tfhub.dev/google/yamnet/1")
+print("Models loaded successfully.\n")
 
 
 # ===============================
-# FEATURE EXTRACTION
+# YAMNET FEATURE EXTRACTION
 # ===============================
-def extract_audio_features(file_path):
-    """
-    Extract MFCC features from an audio file
-    Must match training-time feature extraction
-    """
-    try:
-        y, sr = librosa.load(file_path, sr=SAMPLE_RATE)
+def extract_yamnet_features(audio_path):
+    y, sr = librosa.load(audio_path, sr=SAMPLE_RATE)
 
-        mfcc = librosa.feature.mfcc(
-            y=y,
-            sr=sr,
-            n_mfcc=N_MFCC
-        )
+    # Convert to TensorFlow tensor
+    waveform = tf.convert_to_tensor(y, dtype=tf.float32)
 
-        mfcc_mean = np.mean(mfcc.T, axis=0)
-        return mfcc_mean
+    scores, embeddings, spectrogram = yamnet_model(waveform)
 
-    except Exception as e:
-        print(f"Error processing {file_path}: {e}")
-        return None
+    # Average embeddings over time → (1024,)
+    embedding_mean = tf.reduce_mean(embeddings, axis=0)
+
+    return embedding_mean.numpy()
 
 
 # ===============================
 # PREDICTION FUNCTION
 # ===============================
 def predict_emotion(audio_path):
-    features = extract_audio_features(audio_path)
+    features = extract_yamnet_features(audio_path).reshape(1, -1)
 
-    if features is None:
-        return None, None
-
-    features = features.reshape(1, -1)
-
-    # Predict class
     pred = model.predict(features)[0]
     emotion = encoder.inverse_transform([pred])[0]
 
-    # Predict confidence if supported
     if hasattr(model, "predict_proba"):
-        probs = model.predict_proba(features)[0]
-        confidence = np.max(probs)
+        confidence = np.max(model.predict_proba(features))
     else:
         confidence = None
 
@@ -76,34 +65,29 @@ def predict_emotion(audio_path):
 
 
 # ===============================
-# TEST ON UNSEEN AUDIO FILES
+# MAIN
 # ===============================
 if __name__ == "__main__":
-    print("Testing unseen audio files...\n")
 
-    if not os.path.exists(TEST_AUDIO_DIR):
-        print(f"Test audio directory '{TEST_AUDIO_DIR}' not found!")
-        exit()
+    print("Testing unseen audio files...\n")
+    print("Looking for audio files in:", TEST_AUDIO_DIR)
 
     audio_files = [
-    f for f in os.listdir(TEST_AUDIO_DIR)
-    if f.lower().endswith((".wav", ".mp3"))
-]
+        f for f in os.listdir(TEST_AUDIO_DIR)
+        if f.lower().endswith(SUPPORTED_FORMATS)
+    ]
 
-    if len(audio_files) == 0:
-        print("No .wav files found in test_audio folder.")
+    if not audio_files:
+        print("❌ No audio files found.")
         exit()
 
     for file in audio_files:
-        file_path = os.path.join(TEST_AUDIO_DIR, file)
-        emotion, confidence = predict_emotion(file_path)
-
-        if emotion is None:
-            continue
+        path = os.path.join(TEST_AUDIO_DIR, file)
+        emotion, confidence = predict_emotion(path)
 
         if confidence is not None:
-            print(f"{file}  →  {emotion}  (confidence: {confidence:.2f})")
+            print(f"{file} → {emotion} (confidence: {confidence:.2f})")
         else:
-            print(f"{file}  →  {emotion}")
+            print(f"{file} → {emotion}")
 
     print("\nTesting completed.")
